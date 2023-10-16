@@ -6,6 +6,7 @@ members = [
   "bindings/wasm",
   "libsql-sys",
   "libsql-shell",
+  "xtask",
 ]
 
 [profile.release]
