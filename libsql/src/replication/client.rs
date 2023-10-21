@@ -17,6 +17,7 @@ use std::{
 use anyhow::Context as _;
 use http::Uri;
 use hyper_rustls::HttpsConnectorBuilder;
+use libsql_replication::rpc::{replication::{replication_log_client::ReplicationLogClient, LogOffset, HelloRequest}, proxy::proxy_client::ProxyClient};
 use tonic::{
     body::BoxBody,
     codegen::InterceptedService,
@@ -30,10 +31,10 @@ use tower_http::{
     trace::{self, TraceLayer},
 };
 use uuid::Uuid;
+use libsql_replication::frame::Frame;
+use libsql_replication::meta::WalIndexMeta;
 
 use crate::util::ConnectorService;
-
-use super::{replica::meta::WalIndexMeta, Frame};
 
 use crate::util::box_clone_service::BoxCloneService;
 
@@ -50,8 +51,8 @@ type ResponseBody = trace::ResponseBody<
 #[derive(Debug, Clone)]
 pub struct Client {
     client_id: Uuid,
-    replication: pb::ReplicationLogClient<InterceptedService<GrpcChannel, GrpcInterceptor>>,
-    proxy: pb::ProxyClient<InterceptedService<GrpcChannel, GrpcInterceptor>>,
+    pub(crate) replication: ReplicationLogClient<InterceptedService<GrpcChannel, GrpcInterceptor>>,
+    proxy: ProxyClient<InterceptedService<GrpcChannel, GrpcInterceptor>>,
 }
 
 impl Client {
@@ -71,13 +72,13 @@ impl Client {
 
         let interceptor = GrpcInterceptor(auth_token, namespace);
 
-        let replication = pb::ReplicationLogClient::with_origin(
+        let replication = ReplicationLogClient::with_origin(
             InterceptedService::new(channel.clone(), interceptor.clone()),
             origin.clone(),
         );
 
         let proxy =
-            pb::ProxyClient::with_origin(InterceptedService::new(channel, interceptor), origin);
+            ProxyClient::with_origin(InterceptedService::new(channel, interceptor), origin);
 
         // Remove default tonic `8mb` message limits since fly may buffer
         // messages causing the msg len to be longer.
@@ -97,33 +98,10 @@ impl Client {
         self.client_id.to_string()
     }
 
-    pub async fn hello(&self) -> anyhow::Result<WalIndexMeta> {
-        let mut replication = self.replication.clone();
-        let response = replication
-            .hello(pb::HelloRequest::default())
-            .await?
-            .into_inner();
-
-        let generation_id =
-            Uuid::try_parse(&response.generation_id).context("Unable to parse generation id")?;
-        let database_id =
-            Uuid::try_parse(&response.database_id).context("Unable to parse database id")?;
-
-        // FIXME: not that simple, we need to figure out if we always start from frame 1?
-        let meta = WalIndexMeta {
-            pre_commit_frame_no: 0,
-            post_commit_frame_no: 0,
-            generation_id: generation_id.to_u128_le(),
-            database_id: database_id.to_u128_le(),
-        };
-
-        Ok(meta)
-    }
-
     pub async fn batch_log_entries(&self, next_offset: u64) -> anyhow::Result<Vec<Frame>> {
         let mut client = self.replication.clone();
         let frames = client
-            .batch_log_entries(pb::LogOffset { next_offset })
+            .batch_log_entries(LogOffset { next_offset })
             .await?
             .into_inner();
         let frames = frames
@@ -159,7 +137,7 @@ impl Client {
         use futures::StreamExt;
         let mut client = self.replication.clone();
         let frames = client
-            .snapshot(pb::LogOffset { next_offset })
+            .snapshot(LogOffset { next_offset })
             .await?
             .into_inner();
         let stream = frames.map(|data| match data {

@@ -1,35 +1,38 @@
-mod client;
-mod connection;
-pub mod frame;
-mod parser;
-pub mod replica;
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+/// The frame uniquely identifying, monotonically increasing number
+pub type FrameNo = u64;
+
+use anyhow::Context;
+use libsql_replication::meta::WalIndexMeta;
+use libsql_replication::replicator::{ReplicatorClient, Error};
+use tokio::sync::mpsc::Sender;
+use tokio_stream::Stream;
+
+use crate::util::ConnectorService;
+
+use parser::Statement;
+use client::pb::query::Params;
+use client::pb::{DescribeRequest, DescribeResult, ExecuteResults, Positional, Program, ProgramReq};
+use replica::snapshot::SnapshotFileHeader;
+pub use replica::snapshot::TempSnapshot;
+pub use replica::hook::{Frames, InjectorHookCtx};
+pub use frame::{Frame, FrameHeader};
 
 pub use client::pb;
 pub use connection::RemoteConnection;
 
+mod client;
+mod connection;
+pub mod frame;
+mod parser;
+mod client2;
+pub mod replica;
+
 pub const WAL_PAGE_SIZE: i32 = 4096;
-// pub const WAL_MAGIC: u64 = u64::from_le_bytes(*b"SQLDWAL\0");
-
-/// The frame uniquely identifying, monotonically increasing number
-pub type FrameNo = u64;
-use anyhow::Context;
-pub use frame::{Frame, FrameHeader};
-pub use replica::hook::{Frames, InjectorHookCtx};
-use replica::snapshot::SnapshotFileHeader;
-pub use replica::snapshot::TempSnapshot;
-
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
-
-use client::Client;
-
-use crate::util::ConnectorService;
-
-use self::parser::Statement;
-use self::pb::query::Params;
-use self::pb::{DescribeRequest, DescribeResult, ExecuteResults, Positional, Program, ProgramReq};
 
 pub struct Replicator {
     pub(crate) frames_sender: Sender<Frames>,
@@ -40,13 +43,13 @@ pub struct Replicator {
     _hook_ctx: Arc<parking_lot::Mutex<InjectorHookCtx>>,
     pub(crate) meta: Arc<parking_lot::Mutex<Option<replica::meta::WalIndexMeta>>>,
     pub(crate) injector: replica::injector::FrameInjector<'static>,
-    pub(crate) client: Option<Client>,
+    pub(crate) client: Option<client::Client>,
     pub(crate) next_offset: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
 pub struct Writer {
-    client: Client,
+    client: client::Client,
 }
 
 // FIXME: copy-pasted from sqld, it should be deduplicated in a single place
@@ -141,7 +144,7 @@ impl Replicator {
     ) -> anyhow::Result<Self> {
         let mut me = Self::new(path)?;
 
-        let client = Client::new(connector, endpoint.as_ref().try_into()?, auth_token)?;
+        let client = client::Client::new(connector, endpoint.as_ref().try_into()?, auth_token)?;
         me.client = Some(client);
 
         Ok(me)
