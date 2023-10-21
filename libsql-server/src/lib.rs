@@ -398,6 +398,7 @@ where
                     rpc_config: self.rpc_server_config,
                     db_config: self.db_config.clone(),
                     idle_shutdown_kicker: idle_shutdown_kicker.clone(),
+                    shutdown: self.shutdown.clone(),
                     stats_sender,
                     db_is_dirty,
                     snapshot_callback,
@@ -454,6 +455,7 @@ struct Primary<'a, A> {
     rpc_config: Option<RpcServerConfig<A>>,
     db_config: DbConfig,
     idle_shutdown_kicker: Option<IdleShutdownKicker>,
+    shutdown: Arc<Notify>,
     stats_sender: StatsSender,
     db_is_dirty: bool,
     snapshot_callback: NamespacedSnapshotCallback,
@@ -488,6 +490,7 @@ where
             max_total_response_size: self.db_config.max_total_response_size,
             checkpoint_interval: self.db_config.checkpoint_interval,
             disable_namespace: self.disable_namespaces,
+            shutdown: self.shutdown.clone(),
         };
         let factory = PrimaryNamespaceMaker::new(conf);
         let namespaces = NamespaceStore::new(factory, false);

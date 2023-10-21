@@ -17,7 +17,7 @@ use parking_lot::Mutex;
 use rusqlite::ErrorCode;
 use sqld_libsql_bindings::wal_hook::TRANSPARENT_METHODS;
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant};
 use tokio_util::io::StreamReader;
@@ -28,6 +28,7 @@ use crate::auth::Authenticated;
 use crate::connection::config::DatabaseConfigStore;
 use crate::connection::libsql::{open_conn, MakeLibSqlConn};
 use crate::connection::write_proxy::MakeWriteProxyConn;
+use crate::connection::Connection;
 use crate::connection::MakeConnection;
 use crate::database::{Database, PrimaryDatabase, ReplicaDatabase};
 use crate::error::{Error, LoadDumpError};
@@ -629,6 +630,7 @@ pub struct PrimaryNamespaceConfig {
     pub max_total_response_size: u64,
     pub checkpoint_interval: Option<Duration>,
     pub disable_namespace: bool,
+    pub shutdown: Arc<Notify>,
 }
 
 pub type DumpStream =
@@ -795,6 +797,35 @@ impl Namespace<PrimaryDatabase> {
                 checkpoint_interval,
             ));
         }
+
+        join_set.spawn({
+            let shutdown = config.shutdown.clone();
+            let connection_maker_clone = connection_maker.clone();
+            // let replicator = bottomless_replicator.clone();
+            async move {
+                shutdown.notified().await;
+                if let Ok(conn) = connection_maker_clone.create().await {
+                    if let Err(e) = conn.vacuum_if_needed().await {
+                        tracing::warn!("vacuum failed: {}", e);
+                    }
+                    tracing::info!("started database checkpoint after receiving shutdown signal");
+                    conn.checkpoint().await?;
+                } else {
+                    tracing::warn!("failed to create connection to checkpoint");
+                }
+                println!("checkpoint done");
+                // if let Some(replicator) = replicator {
+                //     let mut replicator = replicator.lock().unwrap();
+                //     replicator.new_generation();
+                //     if let Some(_handle) = replicator.snapshot_main_db_file().await? {
+                //         tracing::trace!(
+                //             "got snapshot handle after restore with generation upgrade"
+                //         );
+                //     }
+                // }
+                Ok(())
+            }
+        });
 
         Ok(Self {
             tasks: join_set,
